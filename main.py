@@ -1,13 +1,16 @@
+import os  # Muhit o'zgaruvchilari bilan ishlash uchun qo'shildi
 import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 import asyncio
-from aiohttp import web  # Yangi qo'shildi
+from aiohttp import web  # Render uchun veb-server
 
-# ⚙️ SOZLAMALAR
-API_TOKEN = '8848826031:AAFRMSjkV2ON9YzqAuIslOeyfux71UjFSls'
-ADMIN_ID = 277126097  
+# ⚙️ SOZLAMALAR (XAVFSIZ USUL)
+# Render platformasida BOT_TOKEN va ADMIN_ID o'zgaruvchilari kiritilsa, ulardan foydalanadi.
+# Agar kiritilmasa, quyidagi zaxira qiymatlarni ishlatadi.
+API_TOKEN = os.getenv("BOT_TOKEN", "8848826031:AAFRMSjkV2ON9YzqAuIslOeyfux71UjFSls")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "277126097"))
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
