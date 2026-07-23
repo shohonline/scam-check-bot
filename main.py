@@ -9,6 +9,7 @@ import sqlite3
 import re
 import pytesseract
 from PIL import Image
+from aiogram.utils.markdown import html_decoration as hd
 
 # ⚙️ SOZLAMALAR
 API_TOKEN = os.getenv("BOT_TOKEN", "8848826031:AAFRMSjkV2ON9YzqAuIslOeyfux71UjFSls")
@@ -166,7 +167,7 @@ async def ask_for_report(message: types.Message):
         parse_mode="Markdown"
     )
 
-# Rasm kelganda ishlaydigan to'g'rilangan funksiya
+# Rasm kelganda ishlaydigan xavfsiz funksiya
 @dp.message(F.photo)
 async def handle_photo_input(message: types.Message):
     status_msg = await message.reply("⏳ Rasm tahlil qilinmoqda (OCR)... Iltimos kuting.")
@@ -180,7 +181,6 @@ async def handle_photo_input(message: types.Message):
     fraud_analysis = analyze_text_for_frauds(ocr_text)
     await bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
 
-    # Adminga yuborish uchun ma'lumot tayyorlaymiz
     user_text = message.caption if message.caption else "Izoh yozilmagan"
     
     builder = InlineKeyboardBuilder()
@@ -188,12 +188,15 @@ async def handle_photo_input(message: types.Message):
     builder.button(text="❌ Rad etish", callback_data=f"reject_{message.from_user.id}")
     builder.adjust(2)
 
+    # Matndagi maxsus belgilarni tozalaymiz (xatolik bermasligi uchun)
+    safe_ocr_text = ocr_text[:300].replace("*", "").replace("_", "").replace("`", "")
+
     report_details = (
         "📣 **YANGI SKRINSHOT / SHIKOYAT!**\n\n"
         f"👤 **Yuboruvchi:** {message.from_user.full_name}\n"
         f"🆔 **ID:** `{message.from_user.id}`\n"
         f"📝 **Rasm ostidagi izoh:** {user_text}\n\n"
-        f"🔍 **OCR topgan matn:**\n`{ocr_text[:300]}`"
+        f"🔍 **OCR topgan matn:**\n`{safe_ocr_text}`"
     )
 
     # Adminga rasm va tugmani yuboramiz
@@ -228,7 +231,6 @@ async def admin_decision(callback: types.CallbackQuery):
     message = callback.message
 
     if action == "approve":
-        # Admin tasdiqlaganda rasm ostidagi izohdan yoki matndan ma'lumot olib bazaga qo'shamiz
         add_to_db("Test_Target_From_Photo", "Chek yoki skrinshot asosida tasdiqlandi", "card")
         await callback.message.edit_caption(
             caption=message.caption + "\n\n✅ **STATUS: BAZAGA QO'SHILDI!**",
