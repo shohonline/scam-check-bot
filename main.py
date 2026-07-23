@@ -111,9 +111,9 @@ app.router.add_get('/', handle)
 
 def main_menu():
     builder = ReplyKeyboardBuilder()
-    builder.button(text="Tekshirish")
-    builder.button(text="Shikoyat yuborish")
-    builder.button(text="Oferta va Qoidalar")
+    builder.button(text="🔍 Tekshirish")
+    builder.button(text="⚠️ Shikoyat yuborish")
+    builder.button(text="📄 Oferta va Qoidalar")
     builder.adjust(2, 1)
     return builder.as_markup(resize_keyboard=True)
 
@@ -128,7 +128,7 @@ async def send_welcome(message: types.Message):
     )
     await message.reply(oferta_text, reply_markup=main_menu())
 
-@dp.message(F.text == "Oferta va Qoidalar")
+@dp.message(F.text == "📄 Oferta va Qoidalar")
 async def show_oferta(message: types.Message):
     await message.reply(
         "Botdan foydalanish qoidalari:\n\n"
@@ -136,7 +136,7 @@ async def show_oferta(message: types.Message):
         "2. Har bir ariza ma'murlar tomonidan tekshiriladi."
     )
 
-@dp.message(F.text == "Tekshirish")
+@dp.message(F.text == "🔍 Tekshirish")
 async def ask_for_check(message: types.Message):
     await message.reply(
         "Tekshirish uchun quyidagilardan birini yuboring:\n\n"
@@ -144,7 +144,7 @@ async def ask_for_check(message: types.Message):
         "- Yoki to'lov cheki / skrinshot rasm"
     )
 
-@dp.message(F.text == "Shikoyat yuborish")
+@dp.message(F.text == "⚠️ Shikoyat yuborish")
 async def ask_for_report(message: types.Message):
     await message.reply(
         "Shikoyat yuborish uchun shubhali karta, telefon raqam yoki havolani hamda isbotlovchi rasmni birga yuboring."
@@ -170,7 +170,6 @@ async def handle_photo_input(message: types.Message):
     builder.button(text="Rad etish", callback_data=f"reject_{message.from_user.id}")
     builder.adjust(2)
 
-    # Markdown ishlatilmaydi, oddiy matn formatida yuboriladi
     report_details = (
         "YANGI SKRINSHOT / SHIKOYAT!\n\n"
         f"Yuboruvchi: {message.from_user.full_name}\n"
@@ -230,10 +229,11 @@ async def check_forwarded_user(message: types.Message):
 
 @dp.message(F.text)
 async def check_text_input(message: types.Message):
-    user_input = message.text.strip().replace(" ", "")
-    if user_input in ["Tekshirish", "Shikoyatyuborish", "OfertavaQoidalar"]:
+    text = message.text.strip()
+    if text in ["🔍 Tekshirish", "⚠️ Shikoyat yuborish", "📄 Oferta va Qoidalar"]:
         return
 
+    user_input = text.replace(" ", "")
     res = check_in_db(user_input)
     if res:
         await message.reply(f"DIQQAT! BAZADA TOPILDI:\n{res[0]}")
