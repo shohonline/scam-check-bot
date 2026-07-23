@@ -6,10 +6,19 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiohttp import web
 import sqlite3
+import re
+import pytesseract
+from PIL import Image
+import io
 
 # ⚙️ SOZLAMALAR
 API_TOKEN = os.getenv("BOT_TOKEN", "8848826031:AAFRMSjkV2ON9YzqAuIslOeyfux71UjFSls")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "277126097"))
+
+# Tesseract o'rnatilgan joyi (Renderda odatda shunday bo'ladi)
+# Agar mahalliy kompyuterda ishlatayotgan bo'lsangiz, yo'lni o'zgartirishingiz mumkin:
+# Masalan: pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Agar apt.yml orqali o'rnatilsa, bu qator shart bo'lmasligi ham mumkin, lekin qo'shib qo'yish zarar qilmaydi.
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
@@ -19,12 +28,12 @@ dp = Dispatcher()
 def init_db():
     conn = sqlite3.connect("fraud_database.db")
     cursor = conn.cursor()
-    # Ma'lumotlar bazasi jadvali
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS frauds (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             target TEXT UNIQUE,
-            reason TEXT
+            reason TEXT,
+            type TEXT  -- 'card', 'phone', 'link' kabi turlarni saqlash uchun
         )
     """)
     conn.commit()
@@ -32,11 +41,12 @@ def init_db():
 
 init_db()
 
-def add_to_db(target, reason):
+def add_to_db(target, reason, fraud_type):
     conn = sqlite3.connect("fraud_database.db")
     cursor = conn.cursor()
     try:
-        cursor.execute("INSERT OR REPLACE INTO frauds (target, reason) VALUES (?, ?)", (target, reason))
+        # Tozalangan targetni saqlaymiz (faqat raqamlar/standart link)
+        cursor.execute("INSERT OR REPLACE INTO frauds (target, reason, type) VALUES (?, ?, ?)", (target, reason, fraud_type))
         conn.commit()
         success = True
     except Exception as e:
@@ -48,18 +58,82 @@ def add_to_db(target, reason):
 def check_in_db(target):
     conn = sqlite3.connect("fraud_database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT reason FROM frauds WHERE target = ?", (target,))
+    cursor.execute("SELECT reason, type FROM frauds WHERE target = ?", (target,))
     result = cursor.fetchone()
     conn.close()
-    return result[0] if result else None
+    return result if result else None
 
-# Render port xatosi bermasligi uchun sodda Web Server
+# 🔍 REGEX PATTERNS (Izlash uchun qoliplar)
+# Karta: 16 ta raqam (orasida probel yoki tire bo'lishi mumkin)
+CARD_REGEX = r'\b(?:\d[ -]*?){16}\b'
+# Telefon: O'zbekiston nomeri +998 bilan yoki 9 talik
+PHONE_REGEX = r'(?:\+?998|0)[ -]*?[1-9][0-9][ -]*?[0-9][0-9][ -]*?[0-9][0-9][ -]*?[0-9][0-9]'
+# Havola: http, https yoki t.me
+LINK_REGEX = r'(https?://[^\s]+|t\.me/[^\s]+)'
+
+def clean_text(text):
+    # Barcha probel va tirelarni olib tashlaymiz
+    return re.sub(r'[\s-]', '', text)
+
+def analyze_text_for_frauds(text):
+    raw_text = text
+    cleaned = clean_text(text)
+    
+    found_items = []
+    
+    # Kartalarni qidirish
+    cards = re.findall(CARD_REGEX, cleaned)
+    for card in cards:
+        if len(card) == 16: # Tekshirish
+            db_result = check_in_db(card)
+            found_items.append({'value': card, 'type': '❌ Karta', 'info': db_result})
+
+    # Telefonlarni qidirish
+    phones = re.findall(PHONE_REGEX, cleaned)
+    for phone in phones:
+        cl_phone = clean_text(phone)
+        # Nomer standartlash (+998 bilan boshlash)
+        if not cl_phone.startswith('+998') and len(cl_phone) == 12:
+             cl_phone = '+' + cl_phone
+        db_result = check_in_db(cl_phone)
+        found_items.append({'value': cl_phone, 'type': '📞 Telefon', 'info': db_result})
+
+    # Havolalarni qidirish
+    links = re.findall(LINK_REGEX, raw_text) # Havolalarni tozalash shart emas
+    for link in links:
+        db_result = check_in_db(link)
+        found_items.append({'value': link, 'info': db_result})
+
+    return found_items
+
+# OCR Funksiyasi
+async def ocr_image(file_id):
+    try:
+        # Rasmni Telegramdan yuklab olamiz
+        file = await bot.get_file(file_id)
+        file_path = file.file_path
+        image_data = await bot.download_file(file_path)
+        
+        # PImaginga ochamiz
+        image = Image.open(image_data)
+        
+        # OCR orqali matnni o'qiymiz (rus va ingliz tillarini qo'llab-quvvatlaymiz, yaxshiroq o'qishi uchun)
+        # Eslatma: Rus va ingliz tillari Tesseractga oldindan o'rnatilgan bo'lishi kerak (apt.yml buni qiladi)
+        text = pytesseract.image_to_string(image, lang='rus+eng')
+        
+        return text
+    except Exception as e:
+        logging.error(f"OCR Error: {e}")
+        return None
+
+# Web Server (Render uchun)
 async def handle(request):
-    return web.Response(text="Bot is running!")
+    return web.Response(text="Bot is running with OCR!")
 
 app = web.Application()
 app.router.add_get('/', handle)
 
+# MENYU
 def main_menu():
     builder = ReplyKeyboardBuilder()
     builder.button(text="🔍 Tekshirish")
@@ -73,15 +147,11 @@ async def send_welcome(message: types.Message):
     oferta_text = (
         "👋 **SCAM CHECK botiga xush kelibsiz!**\n\n"
         "🤖 **Botning vazifasi:**\n"
-        "Ushbu bot internetdagi firibgarlarni aniqlash, shubhali hamyonlar, bank kartalari "
-        "va telefon raqamlarini oldindan tekshirish hamda xavfsiz muhit yaratish uchun xizmat qiladi.\n\n"
-        "🤝 **XALQONA CHORLOV:**\n"
-        "**Agar siz biror shubhali bank kartasi yoki telefon raqamini bilsangiz, darhol ushbu botga kiriting!** "
-        "O'z vaqtida yuborilgan ma'lumotingiz bilan boshqa ko'plab insonlarni firibgarlar tuzog'idan asrab qolgan "
-        "va yaqinlaringizga xavfsiz internet muhitini yaratishda yordam bergan bo'lasiz!\n\n"
-        "⚖️ **OMMAVIY OFERTA (DISCLAIMER):**\n"
-        "Bot foydalanuvchilar tomonidan yuborilgan shikoyatlar asosida ishlovchi axborot almashish platformasidir. "
-        "Tizim ma'lumotlarning 100% to'g'riligiga kafolat bermaydi. Yakuniy qaror **foydalanuvchining** o'zida qoladi.\n\n"
+        "Ushbu bot internetdagi firibgarlarni aniqlash, shubhali hamyonlar, bank kartalari, "
+        "telefon raqamlari va **havolalarni** oldindan tekshirish hamda xavfsiz muhit yaratish uchun xizmat qiladi.\n\n"
+        "🆕 **YANGILIK:** Bot endi **Skrinshotlarni ham tahlil qila oladi!** "
+        "Shunchaki to'lov cheki yoki yozishma skrinshotini yuboring, biz undagi ma'lumotlarni avtomatik tekshiramiz.\n\n"
+        "⚖️ **OMMAVIY OFERTA:** Tizim ma'lumotlarning 100% to'g'riligiga kafolat bermaydi. Yakuniy qaror **foydalanuvchining** o'zida qoladi.\n\n"
         "👉 Botdan foydalanish orqali siz ushbu shartlarga rozilik bildirasiz."
     )
     await message.reply(oferta_text, parse_mode="Markdown", reply_markup=main_menu())
@@ -93,7 +163,7 @@ async def show_oferta(message: types.Message):
         "1️⃣ Asossiz shikoyat yuborish va asossiz tuhmat qilish qat'iyan taqiqlanadi.\n"
         "2️⃣ Har bir yuborilgan ariza ma'murlar tomonidan chek va skrinshotlar orqali tekshiriladi.\n"
         "3️⃣ Tizim orqali qidirilgan ma'lumotlar faqat **foydalanuvchi** xavfsizligi uchun ko'rsatiladi.\n"
-        "4️⃣ Bot hech qachon shaxsiy ma'lumotlarni (ism, rasm, yashash manzili) ommaga oshkor qilmaydi.",
+        "4️⃣ Bot hech qachon shaxsiy ma'lumotlarni ommaga oshkor qilmaydi.",
         parse_mode="Markdown"
     )
 
@@ -102,10 +172,11 @@ async def ask_for_check(message: types.Message):
     await message.reply(
         "📋 **TEKSHIRISH BO'YICHA YO'RIQNOMA:**\n\n"
         "Sotuvchi yoki xizmat ko'rsatuvchini tekshirish uchun quyidagilardan birini botga yuboring:\n\n"
-        "➡️ **1-usul:** Sotuvchining telefon raqamini yozing (Masalan: `+998901234567`)\n"
+        "➡️ **1-usul:** Telefon raqamini yozing (Masalan: `+998901234567`)\n"
         "➡️ **2-usul:** Plastik karta raqamini yozing (Masalan: `8600123456789012`)\n"
-        "➡️ **3-usul:** Gumonlanuvchining Telegram profilidan bitta xabarni ushbu botga **Forward (Uzatish)** qiling.\n\n"
-        "✍️ *Hozirning o'zida ma'lumotni shu yerga matn ko'rinishida yozing yoki xabarni uzating:*",
+        "➡️ **3-usul:** Gumonlanuvchining Telegram profilidan bitta xabarni botga **Forward (Uzatish)** qiling.\n"
+        "➡️ **🆕 4-usul:** To'lov cheki yoki yozishma aks etgan **Rasm (Skrinshot)** yuboring.\n\n"
+        "✍️ *Hozirning o'zida ma'lumotni shu yerga yuboring:*",
         parse_mode="Markdown"
     )
 
@@ -121,124 +192,47 @@ async def ask_for_report(message: types.Message):
         parse_mode="Markdown"
     )
 
+# Rasm kelganda ishlaydigan funksiya (ham shikoyat, ham tekshirish uchun)
 @dp.message(F.photo)
-async def forward_report_to_admin(message: types.Message):
-    user_text = message.caption if message.caption else ""
-    if not user_text:
-        await message.reply("⚠️ Iltimos, rasm ostiga (caption) shubhali **karta raqami** yoki **telefon raqamini** yozib yuboring!")
-        return
-
-    # Admin uchun tasdiqlash inline tugmalari
-    builder = InlineKeyboardBuilder()
-    # Ma'lumotni bazaga qo'shish uchun maxsus kalit so'z formatida uzatamiz
-    builder.button(text="✅ Tasdiqlash va qo'shish", callback_data=f"approve_{message.from_user.id}")
-    builder.button(text="❌ Rad etish", callback_data=f"reject_{message.from_user.id}")
-    builder.adjust(2)
-
-    report_details = (
-        "📣 **YANGI FIRIBGARLIK HAQIDA SHIKOYAT!**\n\n"
-        f"👤 **Yuboruvchi:** {message.from_user.full_name}\n"
-        f"🆔 **Yuboruvchi ID:** `{message.from_user.id}`\n"
-        f"🔗 **Username:** @{message.from_user.username if message.from_user.username else 'Yoʻq'}\n\n"
-        f"📝 **Tekshirilishi kerak bo'lgan raqam/karta va izoh:**\n{user_text}"
-    )
-
-    # Adminga rasm va tugmani yuboramiz
-    await bot.send_photo(
-        chat_id=ADMIN_ID, 
-        photo=message.photo[-1].file_id, 
-        caption=report_details, 
-        parse_mode="Markdown",
-        reply_markup=builder.as_markup()
-    )
+async def handle_photo_input(message: types.Message):
+    # 1. OCR orqali matnni o'qiymiz
+    status_msg = await message.reply("⏳ Rasm tahlil qilinmoqda (OCR)... Bu biroz vaqt olishi mumkin.")
+    photo_file_id = message.photo[-1].file_id
+    ocr_text = await ocr_image(photo_file_id)
     
-    await message.reply(
-        "✅ **Shikoyatingiz va isbotlovchi chek (rasm) qabul qilindi!**\n\n"
-        "Ma'murlarimiz tez fursatda tekshirib, ma'lumotni bazaga kiritishadi. Rahmat! 🙏",
-        parse_mode="Markdown"
-    )
-
-@dp.callback_query(F.data.startswith("approve_") | F.data.startswith("reject_"))
-async def admin_decision(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("Siz admin emassiz!", show_alert=True)
+    if not ocr_text:
+        await bot.edit_message_text(chat_id=message.chat.id, message_id=status_msg.message_id, text="❌ Rasmdan matn o'qib bo'lmadi. Iltimos, tiniqroq rasm yuboring yoki matn/forward qiling.")
         return
 
-    action, user_id = callback.data.split("_")
-    message = callback.message
-
-    if message.caption:
-        lines = message.caption.split("\n")
-        # Matn ichidan yuborilgan raqam/karta ma'lumotini ajratib olamiz
-        target_info = lines[-1].strip()
-    else:
-        target_info = "Noma'lum"
-
-    if action == "approve":
-        # Bazaga qo'shish (oxirgi qatordagi ma'lumotni kalit qilib olamiz)
-        add_to_db(target_info, "Foydalanuvchi shikoyati va chek asosida tasdiqlangan.")
-        await callback.message.edit_caption(
-            caption=message.caption + "\n\n✅ **STATUS: BAZAGA QO'SHILDI VA TASDIQLANDI!**",
-            parse_mode="Markdown"
-        )
-        await callback.answer("Muvaffaqiyatli bazaga qo'shildi!")
-    else:
-        await callback.message.edit_caption(
-            caption=message.caption + "\n\n❌ **STATUS: RAD ETILDI!**",
-            parse_mode="Markdown"
-        )
-        await callback.answer("Shikoyat rad etildi.")
-
-@dp.message(F.forward_from)
-async def check_forwarded_user(message: types.Message):
-    tg_id = str(message.forward_from.id)
-    reason = check_in_db(tg_id)
-    if reason:
-        await message.reply(
-            f"🚨 **DIQQAT! XAVF ANIQLANDI!**\n\n"
-            f"Ushbu Telegram ID (`{tg_id}`) bo'yicha bazamizda ma'lumot bor:\n*{reason}*\n\n"
-            f"Oldindan pul o'tkazmaslikni tavsiya etamiz!", parse_mode="Markdown"
-        )
-    else:
-        await message.reply(
-            f"✅ Ushbu Telegram ID (`{tg_id}`) hozircha qora ro'yxatda mavjud emas.\n"
-            f"Har doim hushyor bo'ling!", parse_mode="Markdown"
-        )
-
-@dp.message(F.text)
-async def check_text_input(message: types.Message):
-    user_input = message.text.strip().replace(" ", "")
+    # 2. Matnni tahlil qilib, shubhali ma'lumotlarni ajratamiz
+    fraud_analysis = analyze_text_for_frauds(ocr_text)
     
-    if user_input in ["🔍Tekshirish", "⚠️Shikoyatyuborish", "ℹ️OfertavaQoidalar"]:
-        return
+    await bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
 
-    reason = check_in_db(user_input)
-    if reason:
-        await message.reply(
-            f"🚨 **DIQQAT! SHUBHALI RAQAM/KARTA!**\n\n"
-            f"Ushbu ma'lumot bo'yicha bazamizda topildi:\n*{reason}*\n\n"
-            f"Firibgarlik qurboni bo'lmaslik uchun ehtiyot bo'ling!", parse_mode="Markdown"
-        )
+    # 3. Natijalarni ko'rsatamiz
+    if fraud_analysis:
+        response_text = "🚨 **SKRINSHOT TAHLILI NATIJASI:**\n\n"
+        found_fraud = False
+        
+        # Tekshirilgan elementlar bo'yicha javob tuzamiz
+        checked_values = set() # Takrorlanmaslik uchun
+        
+        for item in fraud_analysis:
+            if item['value'] in checked_values: continue
+            checked_values.add(item['value'])
+            
+            if item['info']:
+                response_text += f"{item['type']}: `{item['value']}` -> ⚠️ **BAZADA BOR!** {item['info'][0]}\n"
+                found_fraud = True
+            else:
+                # Agar bazada topilmasa, odatda uni shubhali deb belgilash shart emas. 
+                # Lekin biz hamma topilgan narsani ko'rsatamiz shaffoflik uchun.
+                response_text += f"{item['type']}: `{item['value']}` -> ✅ Bazada topilmadi.\n"
+                
+        if not found_fraud:
+             response_text += "\n✅ Rasmda aniqlangan ma'lumotlar bazamizdagi ma'lum qora ro'yxat bilan mos kelmadi. Har doim hushyor bo'ling!"
+
+        response_text += "\n⚠️ *Eslatma: Bu avtomatlashtirilgan tahlil. Yakuniy qaror o'zingizga bog'liq.*"
+        
     else:
-        await message.reply(
-            "✅ **Ushbu ma'lumotlar bazamizda topilmadi.**\n\n"
-            "⚠️ *Eslatma:* Bu ma'lumotning bazada yo'qligi u shaxsning 100% xavfsiz ekanligini anglatmaydi. "
-            "Har doim hushyor bo'ling!\n\n"
-            "💡 **Sizning yordamingiz kerak:**\n"
-            "Agar siz ushbu shaxs yoki boshqa shubhali karta/telefon raqami haqida aniq dalillarga ega bo'lsangiz, "
-            "uni botimizga shikoyat sifatida yuboring! 🙏", 
-            parse_mode="Markdown"
-        )
-
-async def start_bot():
-    await dp.start_polling(bot)
-
-async def main():
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 10000) # Render porti
-    await site.start()
-    await start_bot()
-
-if __name__ == '__main__':
-    asyncio.run(main())
+        response_text = "✅ Rasm t
